@@ -208,46 +208,6 @@ def load_model(model_name):
         st.error(f"❌ Error loading {model_name}")
         st.error(f"Detail: {status}")
         
-        with st.expander("🔧 Solusi untuk Error Ini"):
-            st.markdown("""
-            **Error ini terjadi karena incompatibility TensorFlow versions.**
-            
-            ### Solusi 1: Re-save Model (di Colab)
-            ```python
-            from tensorflow import keras
-            
-            # Load model lama
-            model = keras.models.load_model('model_lama.h5', compile=False)
-            
-            # Re-compile
-            model.compile(
-                optimizer='adam',
-                loss='sparse_categorical_crossentropy',
-                metrics=['accuracy']
-            )
-            
-            # Save ulang
-            model.save('model_baru.h5')
-            ```
-            
-            ### Solusi 2: Gunakan SavedModel format
-            ```python
-            # Di Colab, save dengan format SavedModel
-            model.save('model_folder/')  # Tanpa .h5
-            
-            # Di Streamlit, load dari folder
-            model = keras.models.load_model('model_folder/')
-            ```
-            
-            ### Solusi 3: Export weights only
-            ```python
-            # Di Colab
-            model.save_weights('model_weights.h5')
-            
-            # Di Streamlit, rebuild model lalu load weights
-            ```
-            """)
-        return None
     
     return model
 
@@ -749,7 +709,6 @@ def show_about_page():
     
     ### 🔬 Dataset
     - **Subjects:** 25 participants
-    - **Channels:** 20 EEG electrodes
     - **Sampling Rate:** 200 Hz
     - **Classes:** 2 (Training, Online)
     - **Data Split:** 70% train, 15% validation, 15% test
@@ -759,10 +718,6 @@ def show_about_page():
     - **Institution:** Program Studi Teknik Informatika, Universitas Padjadjaran.
     - **Course:** Machine Learning
     - **Year:** 2025
-    
-    ### 📚 References
-    1. Lawhern et al. (2018). "EEGNet: A Compact Convolutional Neural Network for EEG-based BCIs"
-    2. Schirrmeister et al. (2017). "Deep learning with convolutional neural networks for EEG decoding"
     
     """)
 
