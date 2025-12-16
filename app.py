@@ -10,14 +10,21 @@ Model: CNN1D, LSTM, CNN-LSTM Hybrid, EEGNet
 import streamlit as st
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-from tensorflow import keras
 import plotly.graph_objects as go
 import plotly.express as px
 from scipy import signal
 import io
 import os
 from pathlib import Path
+
+# Import TensorFlow dengan error handling
+try:
+    import tensorflow as tf
+    from tensorflow import keras
+    TF_AVAILABLE = True
+except ImportError:
+    TF_AVAILABLE = False
+    st.error("⚠️ TensorFlow tidak terinstal. Install dengan: pip install tensorflow")
 
 # ==================== KONFIGURASI ====================
 st.set_page_config(
@@ -38,17 +45,17 @@ MODEL_DIR = "models"
 st.markdown("""
 <style>
     .main-header {
-        font-size: 3rem;
+        font-size: 2.5rem;
         font-weight: bold;
         text-align: center;
         color: #1f77b4;
-        margin-bottom: 2rem;
+        margin-bottom: 1.5rem;
     }
     .sub-header {
         font-size: 1.5rem;
         font-weight: 600;
         color: #2c3e50;
-        margin-top: 2rem;
+        margin-top: 1.5rem;
         margin-bottom: 1rem;
     }
     .metric-card {
@@ -71,6 +78,9 @@ st.markdown("""
         border-radius: 5px;
         margin: 1rem 0;
     }
+    .stButton>button {
+        width: 100%;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -79,20 +89,28 @@ st.markdown("""
 @st.cache_data
 def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
     """Band-pass filter"""
-    nyquist = 0.5 * fs
-    low = lowcut / nyquist
-    high = highcut / nyquist
-    b, a = signal.butter(order, [low, high], btype='band')
-    filtered_data = signal.filtfilt(b, a, data, axis=0)
-    return filtered_data
+    try:
+        nyquist = 0.5 * fs
+        low = lowcut / nyquist
+        high = highcut / nyquist
+        b, a = signal.butter(order, [low, high], btype='band')
+        filtered_data = signal.filtfilt(b, a, data, axis=0)
+        return filtered_data
+    except Exception as e:
+        st.error(f"Error in bandpass filter: {e}")
+        return data
 
 
 @st.cache_data
 def notch_filter(data, fs, freq=50.0, quality=30):
     """Notch filter untuk powerline noise"""
-    b, a = signal.iirnotch(freq, quality, fs)
-    filtered_data = signal.filtfilt(b, a, data, axis=0)
-    return filtered_data
+    try:
+        b, a = signal.iirnotch(freq, quality, fs)
+        filtered_data = signal.filtfilt(b, a, data, axis=0)
+        return filtered_data
+    except Exception as e:
+        st.error(f"Error in notch filter: {e}")
+        return data
 
 
 def preprocess_eeg_data(data):
@@ -136,22 +154,23 @@ def preprocess_eeg_data(data):
     return normalized_epochs
 
 
-# ==================== FUNGSI LOAD MODEL (FIXED) ====================
+# ==================== FUNGSI LOAD MODEL ====================
 
-def load_model_robust(model_path):
+def load_model_safe(model_path):
     """
     Load model dengan multiple fallback strategies
-    Mengatasi error: batch_shape, dtype, dll
     """
-    import warnings
-    warnings.filterwarnings('ignore')
+    if not TF_AVAILABLE:
+        return None, "TensorFlow not available"
     
-    # Strategy 1: Load without compile (PALING AMAN)
+    if not os.path.exists(model_path):
+        return None, f"Model file not found: {model_path}"
+    
     try:
-        with tf.keras.utils.custom_object_scope({}):
-            model = keras.models.load_model(model_path, compile=False)
+        # Strategy 1: Load without compile
+        model = keras.models.load_model(model_path, compile=False)
         
-        # Re-compile dengan config standard
+        # Re-compile
         model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=0.001),
             loss='sparse_categorical_crossentropy',
@@ -160,54 +179,40 @@ def load_model_robust(model_path):
         return model, "success"
     
     except Exception as e1:
-        # Strategy 2: Normal load (fallback)
         try:
+            # Strategy 2: Normal load
             model = keras.models.load_model(model_path)
             return model, "success"
-        
         except Exception as e2:
-            # Strategy 3: Load with custom objects
-            try:
-                custom_objects = {
-                    'InputLayer': keras.layers.InputLayer,
-                }
-                model = keras.models.load_model(model_path, custom_objects=custom_objects, compile=False)
-                model.compile(
-                    optimizer='adam',
-                    loss='sparse_categorical_crossentropy',
-                    metrics=['accuracy']
-                )
-                return model, "success"
-            
-            except Exception as e3:
-                # All strategies failed
-                error_msg = f"Load failed: {str(e3)[:150]}"
-                return None, error_msg
+            error_msg = f"Failed to load model: {str(e2)[:200]}"
+            return None, error_msg
 
 
 @st.cache_resource
 def load_model(model_name):
-    """Load trained model with robust error handling"""
+    """Load trained model with caching"""
     model_path = os.path.join(MODEL_DIR, f"{model_name}_final.h5")
     
-    if not os.path.exists(model_path):
-        st.error(f"❌ Model tidak ditemukan: {model_path}")
-        st.info("""
-        **Cara fix:**
-        1. Pastikan file model ada di folder `models/`
-        2. Format nama file: `{model_name}_final.h5`
-        3. Contoh: `CNN1D_final.h5`, `LSTM_final.h5`
-        """)
-        return None
-    
-    # Try robust loading
-    with st.spinner(f"Loading {model_name}..."):
-        model, status = load_model_robust(model_path)
+    with st.spinner(f"⏳ Loading {model_name}..."):
+        model, status = load_model_safe(model_path)
     
     if model is None:
-        st.error(f"❌ Error loading {model_name}")
-        st.error(f"Detail: {status}")
-        
+        st.error(f"❌ Failed to load {model_name}")
+        st.error(f"Error: {status}")
+        with st.expander("🔧 Troubleshooting"):
+            st.markdown("""
+            **Kemungkinan penyebab:**
+            1. File model tidak ada di folder `models/`
+            2. Format file model corrupt
+            3. TensorFlow version mismatch
+            
+            **Solusi:**
+            1. Pastikan file ada: `models/{model_name}_final.h5`
+            2. Re-download model dari training
+            3. Check requirements.txt untuk versi TensorFlow yang sesuai
+            """)
+    else:
+        st.success(f"✅ Model {model_name} loaded successfully!")
     
     return model
 
@@ -215,11 +220,12 @@ def load_model(model_name):
 def get_available_models():
     """Get list of available models"""
     if not os.path.exists(MODEL_DIR):
+        os.makedirs(MODEL_DIR, exist_ok=True)
         return []
     
     model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith('_final.h5')]
     model_names = [f.replace('_final.h5', '') for f in model_files]
-    return model_names
+    return sorted(model_names)
 
 
 # ==================== FUNGSI VISUALISASI ====================
@@ -231,13 +237,15 @@ def plot_eeg_signal(data, title="EEG Signal", max_channels=5):
     
     fig = go.Figure()
     
+    colors = px.colors.qualitative.Plotly
+    
     for i in range(n_channels):
         fig.add_trace(go.Scatter(
             x=time,
-            y=data[:, i] + i * 3,  # Offset untuk visualisasi
+            y=data[:, i] + i * 3,
             mode='lines',
             name=f'Channel {i+1}',
-            line=dict(width=1)
+            line=dict(width=1.5, color=colors[i % len(colors)])
         ))
     
     fig.update_layout(
@@ -246,7 +254,9 @@ def plot_eeg_signal(data, title="EEG Signal", max_channels=5):
         yaxis_title="Amplitude (Normalized + Offset)",
         height=400,
         hovermode='x unified',
-        template='plotly_white'
+        template='plotly_white',
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     
     return fig
@@ -254,7 +264,11 @@ def plot_eeg_signal(data, title="EEG Signal", max_channels=5):
 
 def plot_power_spectrum(data, channel=0):
     """Plot power spectral density"""
-    f, psd = signal.welch(data[:, channel], fs=SAMPLING_RATE, nperseg=256)
+    try:
+        f, psd = signal.welch(data[:, channel], fs=SAMPLING_RATE, nperseg=256)
+    except Exception as e:
+        st.error(f"Error calculating PSD: {e}")
+        return None
     
     fig = go.Figure()
     
@@ -282,7 +296,8 @@ def plot_power_spectrum(data, channel=0):
             layer="below",
             line_width=0,
             annotation_text=band_name,
-            annotation_position="top left"
+            annotation_position="top left",
+            annotation_font_size=10
         )
     
     fig.update_layout(
@@ -298,16 +313,16 @@ def plot_power_spectrum(data, channel=0):
     return fig
 
 
-def plot_prediction_confidence(predictions):
+def plot_prediction_confidence(avg_predictions):
     """Plot prediction confidence"""
     classes = ['Training', 'Online']
     
     fig = go.Figure(data=[
         go.Bar(
             x=classes,
-            y=predictions[0],
+            y=avg_predictions,
             marker_color=['#3498db', '#e74c3c'],
-            text=[f'{p:.2%}' for p in predictions[0]],
+            text=[f'{p:.2%}' for p in avg_predictions],
             textposition='outside'
         )
     ])
@@ -317,7 +332,7 @@ def plot_prediction_confidence(predictions):
         xaxis_title="Class",
         yaxis_title="Probability",
         yaxis_range=[0, 1.1],
-        height=400,
+        height=350,
         template='plotly_white'
     )
     
@@ -333,22 +348,33 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.image("https://img.icons8.com/color/96/000000/brain.png", width=100)
-        st.title("Navigation")
+        st.markdown("### 🧠 EEG Classifier")
+        st.markdown("---")
         
         page = st.radio(
-            "Select Page:",
-            ["🏠 Home", "📊 Model Demo", "📈 Model Comparison", "ℹ️ About"]
+            "📍 Navigation:",
+            ["🏠 Home", "📊 Model Demo", "📈 Model Comparison", "ℹ️ About"],
+            label_visibility="collapsed"
         )
         
         st.markdown("---")
         st.markdown("### ⚙️ Configuration")
         st.info(f"""
-        **Preprocessing Settings:**
-        - Sampling Rate: {SAMPLING_RATE} Hz
-        - Bandpass: {LOWCUT}-{HIGHCUT} Hz
-        - Epoch Length: {EPOCH_LENGTH}s
+        **Preprocessing:**
+        - SR: {SAMPLING_RATE} Hz
+        - Filter: {LOWCUT}-{HIGHCUT} Hz
+        - Epoch: {EPOCH_LENGTH}s
         """)
+        
+        st.markdown("---")
+        st.markdown("### 📦 Models")
+        models = get_available_models()
+        if models:
+            st.success(f"✅ {len(models)} model(s) available")
+            for m in models:
+                st.text(f"• {m}")
+        else:
+            st.warning("⚠️ No models found")
     
     # Main Content
     if page == "🏠 Home":
@@ -370,12 +396,12 @@ def show_home_page():
     
     with col1:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Models Available", len(get_available_models()))
+        st.metric("Models", len(get_available_models()))
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col2:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Input Channels", "20")
+        st.metric("Channels", "20")
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col3:
@@ -385,28 +411,57 @@ def show_home_page():
     
     st.markdown("---")
     
-    # Project Overview
     st.markdown("### 📋 Project Overview")
     st.markdown("""
-    This application demonstrates deep learning models for EEG signal classification.
-    The models are trained to classify EEG signals into two categories:
-    - **Training Data**: Signals from training sessions
-    - **Online Data**: Signals from online/testing sessions
+    Aplikasi ini mendemonstrasikan model deep learning untuk klasifikasi sinyal EEG.
+    Model dilatih untuk mengklasifikasikan sinyal EEG ke dalam dua kategori:
     
-    **Available Models:**
-    1. **CNN1D**: 1D Convolutional Neural Network for temporal feature extraction
-    2. **LSTM**: Long Short-Term Memory for temporal dependencies
-    3. **CNN-LSTM Hybrid**: Combined architecture for spatial-temporal features
-    4. **EEGNet**: State-of-the-art architecture specifically designed for EEG
+    - **Training Data**: Sinyal dari sesi training
+    - **Online Data**: Sinyal dari sesi online/testing
     """)
     
+    st.markdown("### 🤖 Available Models")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("""
+        **CNN1D**
+        - 1D Convolutional Neural Network
+        - Ekstraksi fitur temporal lokal
+        - Cocok untuk pattern recognition
+        
+        **LSTM**
+        - Long Short-Term Memory
+        - Menangkap dependensi temporal jangka panjang
+        - Bidirectional architecture
+        """)
+    
+    with col2:
+        st.markdown("""
+        **CNN-LSTM Hybrid**
+        - Kombinasi CNN dan LSTM
+        - Fitur spatial-temporal
+        - Best of both worlds
+        
+        **EEGNet**
+        - State-of-the-art untuk EEG
+        - Depthwise separable convolutions
+        - Efficient dan akurat
+        """)
+    
+    st.markdown("---")
     st.markdown("### 🚀 Quick Start")
+    
     st.markdown("""
-    1. Go to **📊 Model Demo** page
-    2. Upload your EEG data (CSV format)
-    3. Select a model
-    4. Click **Predict** to see results!
+    1. 📊 Klik **Model Demo** di sidebar
+    2. 📁 Upload file CSV berisi sinyal EEG Anda
+    3. 🤖 Pilih model yang ingin digunakan
+    4. 🎯 Klik **Preprocess & Predict**
+    5. 📈 Lihat hasil prediksi dan visualisasi!
     """)
+    
+    st.info("💡 **Tip**: Gunakan file `sample_eeg.csv` di folder `data/` untuk testing")
 
 
 # ==================== PAGE: DEMO ====================
@@ -414,169 +469,206 @@ def show_home_page():
 def show_demo_page():
     st.markdown('<div class="sub-header">Model Demo & Prediction</div>', unsafe_allow_html=True)
     
+    # Check TensorFlow
+    if not TF_AVAILABLE:
+        st.error("❌ TensorFlow tidak terinstal!")
+        st.info("Install dengan: `pip install tensorflow`")
+        return
+    
     # Check available models
     available_models = get_available_models()
     
     if not available_models:
-        st.error("❌ No models found! Please place model files in 'models/' directory.")
-        st.info("Expected format: `ModelName_final.h5`")
+        st.warning("⚠️ Tidak ada model yang ditemukan!")
+        st.info("""
+        **Cara menambahkan model:**
+        1. Pastikan folder `models/` ada
+        2. Upload file model dengan format: `NamaModel_final.h5`
+        3. Contoh: `CNN1D_final.h5`, `LSTM_final.h5`
+        """)
         return
     
     # Model selection
-    selected_model = st.selectbox(
-        "Select Model:",
-        available_models,
-        help="Choose a trained model for prediction"
-    )
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        selected_model = st.selectbox(
+            "🤖 Select Model:",
+            available_models,
+            help="Pilih model untuk prediksi"
+        )
+    
+    with col2:
+        st.metric("Model Status", "✅ Ready" if selected_model else "❌ None")
+    
+    st.markdown("---")
     
     # File upload
     st.markdown("### 📁 Upload EEG Data")
+    
     uploaded_file = st.file_uploader(
         "Upload CSV file (samples × channels)",
         type=['csv'],
-        help="CSV file with shape (n_samples, n_channels)"
+        help="File CSV dengan shape (n_samples, n_channels). Expected: 20 channels"
     )
     
     if uploaded_file is not None:
         try:
-            # Load data dengan handling berbagai format
-            try:
-                # Try 1: Load tanpa header (numeric only)
-                data = pd.read_csv(uploaded_file, header=None).values
-            except:
-                # Try 2: Load dengan header, ambil numeric columns
-                df = pd.read_csv(uploaded_file)
-                # Drop non-numeric columns
-                numeric_cols = df.select_dtypes(include=[np.number]).columns
-                data = df[numeric_cols].values
+            # Load data
+            data = load_eeg_data(uploaded_file)
             
-            # Validate shape
-            if len(data.shape) != 2:
-                st.error(f"❌ Data harus 2D array (samples × channels), got shape: {data.shape}")
-                st.stop()
+            if data is None:
+                return
             
-            if data.shape[1] != 20:
-                st.warning(f"⚠️ Expected 20 channels, got {data.shape[1]} channels")
-                st.info("Model trained with 20 channels. Results may be inaccurate.")
-            
-            if data.shape[0] < 800:
-                st.error(f"❌ Data terlalu pendek! Minimal 800 samples (4 detik), got {data.shape[0]}")
-                st.info(f"Duration: {data.shape[0] / SAMPLING_RATE:.2f} seconds")
-                st.stop()
-            
-            st.success(f"✅ Data loaded: {data.shape[0]} samples × {data.shape[1]} channels")
-            
-            # Display data info
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Total Samples", f"{data.shape[0]:,}")
-                st.metric("Duration", f"{data.shape[0] / SAMPLING_RATE:.2f} seconds")
-            
-            with col2:
-                st.metric("Channels", data.shape[1])
-                st.metric("Sampling Rate", f"{SAMPLING_RATE} Hz")
-            
-            # Data quality check
-            with st.expander("📊 Data Quality Check"):
-                st.write("**Data Statistics:**")
-                stats_df = pd.DataFrame({
-                    'Metric': ['Mean', 'Std', 'Min', 'Max', 'NaN Count'],
-                    'Value': [
-                        f"{data.mean():.4f}",
-                        f"{data.std():.4f}",
-                        f"{data.min():.4f}",
-                        f"{data.max():.4f}",
-                        f"{np.isnan(data).sum()}"
-                    ]
-                })
-                st.table(stats_df)
-                
-                # Check for issues
-                issues = []
-                if np.isnan(data).any():
-                    issues.append("⚠️ Data contains NaN values")
-                if np.isinf(data).any():
-                    issues.append("⚠️ Data contains Inf values")
-                if data.std() == 0:
-                    issues.append("⚠️ Data has zero variance")
-                
-                if issues:
-                    for issue in issues:
-                        st.warning(issue)
-                else:
-                    st.success("✅ Data quality OK")
+            # Display info
+            display_data_info(data)
             
             # Visualize raw signal
-            st.markdown("### 📊 Raw Signal Visualization")
+            st.markdown("### 📊 Raw Signal Preview")
             fig_signal = plot_eeg_signal(data[:1000], "Raw EEG Signal (First 5 seconds)")
             st.plotly_chart(fig_signal, use_container_width=True)
             
-            # Preprocess button
-            if st.button("🔄 Preprocess & Predict", type="primary"):
-                with st.spinner("Processing..."):
-                    # Preprocess
-                    epochs = preprocess_eeg_data(data)
-                    
-                    st.success(f"✅ Preprocessing complete! Created {epochs.shape[0]} epochs")
-                    
-                    # Load model
-                    model = load_model(selected_model)
-                    
-                    if model is not None:
-                        # Predict
-                        predictions = model.predict(epochs, verbose=0)
-                        
-                        # Get average prediction
-                        avg_pred = np.mean(predictions, axis=0)
-                        pred_class = np.argmax(avg_pred)
-                        confidence = avg_pred[pred_class]
-                        
-                        # Display results
-                        st.markdown("### 🎯 Prediction Results")
-                        
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            st.markdown('<div class="success-box">', unsafe_allow_html=True)
-                            st.metric("Predicted Class", "Training" if pred_class == 0 else "Online")
-                            st.markdown('</div>', unsafe_allow_html=True)
-                        
-                        with col2:
-                            st.metric("Confidence", f"{confidence:.2%}")
-                        
-                        with col3:
-                            st.metric("Epochs Processed", epochs.shape[0])
-                        
-                        # Plot confidence
-                        fig_conf = plot_prediction_confidence(predictions.mean(axis=0, keepdims=True))
-                        st.plotly_chart(fig_conf, use_container_width=True)
-                        
-                        # Show per-epoch predictions
-                        with st.expander("📋 Per-Epoch Predictions"):
-                            pred_df = pd.DataFrame({
-                                'Epoch': range(1, len(predictions) + 1),
-                                'Training Prob': predictions[:, 0],
-                                'Online Prob': predictions[:, 1],
-                                'Predicted Class': ['Training' if p[0] > p[1] else 'Online' for p in predictions]
-                            })
-                            st.dataframe(pred_df, use_container_width=True)
-                        
-                        # Visualize preprocessed signal
-                        st.markdown("### 📊 Preprocessed Signal")
-                        fig_processed = plot_eeg_signal(
-                            epochs[0], 
-                            f"Preprocessed Epoch 1 (Model Input)",
-                            max_channels=5
-                        )
-                        st.plotly_chart(fig_processed, use_container_width=True)
-                        
-                        # Power spectrum
-                        fig_psd = plot_power_spectrum(epochs[0])
-                        st.plotly_chart(fig_psd, use_container_width=True)
+            # Predict button
+            st.markdown("---")
+            if st.button("🚀 Preprocess & Predict", type="primary", use_container_width=True):
+                predict_and_display(data, selected_model)
         
         except Exception as e:
-            st.error(f"❌ Error processing file: {e}")
-            st.info("Make sure your CSV file has the correct format (samples × channels)")
+            st.error(f"❌ Error: {e}")
+            st.exception(e)
+
+
+def load_eeg_data(uploaded_file):
+    """Load and validate EEG data from uploaded file"""
+    try:
+        # Try loading without header
+        data = pd.read_csv(uploaded_file, header=None).values
+    except:
+        try:
+            # Try with header
+            df = pd.read_csv(uploaded_file)
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            data = df[numeric_cols].values
+        except Exception as e:
+            st.error(f"❌ Gagal membaca file: {e}")
+            return None
+    
+    # Validate
+    if len(data.shape) != 2:
+        st.error(f"❌ Data harus 2D (samples × channels), got: {data.shape}")
+        return None
+    
+    if data.shape[1] != 20:
+        st.warning(f"⚠️ Expected 20 channels, got {data.shape[1]}")
+    
+    if data.shape[0] < 800:
+        st.error(f"❌ Data terlalu pendek! Min 800 samples, got {data.shape[0]}")
+        st.info(f"Duration: {data.shape[0]/SAMPLING_RATE:.2f}s (need ≥4s)")
+        return None
+    
+    # Check for NaN/Inf
+    if np.isnan(data).any() or np.isinf(data).any():
+        st.warning("⚠️ Data contains NaN/Inf values. Replacing with zeros...")
+        data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    st.success(f"✅ Data loaded: {data.shape[0]:,} samples × {data.shape[1]} channels")
+    
+    return data
+
+
+def display_data_info(data):
+    """Display data information"""
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Samples", f"{data.shape[0]:,}")
+    with col2:
+        st.metric("Channels", data.shape[1])
+    with col3:
+        st.metric("Duration", f"{data.shape[0]/SAMPLING_RATE:.1f}s")
+    with col4:
+        epochs = data.shape[0] // (SAMPLING_RATE * EPOCH_LENGTH)
+        st.metric("Epochs", epochs)
+    
+    with st.expander("📊 Data Statistics"):
+        stats = pd.DataFrame({
+            'Mean': [f"{data.mean():.4f}"],
+            'Std': [f"{data.std():.4f}"],
+            'Min': [f"{data.min():.4f}"],
+            'Max': [f"{data.max():.4f}"],
+            'NaN': [np.isnan(data).sum()]
+        })
+        st.dataframe(stats, use_container_width=True)
+
+
+def predict_and_display(data, model_name):
+    """Preprocess data and make predictions"""
+    
+    # Preprocess
+    epochs = preprocess_eeg_data(data)
+    st.success(f"✅ Created {epochs.shape[0]} epochs")
+    
+    # Load model
+    model = load_model(model_name)
+    
+    if model is None:
+        st.error("❌ Model gagal di-load. Tidak bisa melakukan prediksi.")
+        return
+    
+    # Predict
+    with st.spinner("🔮 Predicting..."):
+        predictions = model.predict(epochs, verbose=0)
+    
+    # Calculate average
+    avg_pred = np.mean(predictions, axis=0)
+    pred_class = np.argmax(avg_pred)
+    confidence = avg_pred[pred_class]
+    
+    # Display results
+    st.markdown("---")
+    st.markdown("### 🎯 Prediction Results")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown('<div class="success-box">', unsafe_allow_html=True)
+        class_name = "Training" if pred_class == 0 else "Online"
+        st.metric("Predicted Class", class_name)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.metric("Confidence", f"{confidence:.2%}")
+    
+    with col3:
+        st.metric("Epochs", epochs.shape[0])
+    
+    # Confidence plot
+    fig_conf = plot_prediction_confidence(avg_pred)
+    st.plotly_chart(fig_conf, use_container_width=True)
+    
+    # Per-epoch predictions
+    with st.expander("📋 Detailed Per-Epoch Predictions"):
+        pred_df = pd.DataFrame({
+            'Epoch': range(1, len(predictions) + 1),
+            'Training Prob': [f"{p[0]:.4f}" for p in predictions],
+            'Online Prob': [f"{p[1]:.4f}" for p in predictions],
+            'Predicted': ['Training' if p[0] > p[1] else 'Online' for p in predictions]
+        })
+        st.dataframe(pred_df, use_container_width=True, height=300)
+    
+    # Visualizations
+    st.markdown("### 📊 Signal Analysis")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        fig_processed = plot_eeg_signal(epochs[0], "Preprocessed Epoch 1", max_channels=5)
+        st.plotly_chart(fig_processed, use_container_width=True)
+    
+    with col2:
+        fig_psd = plot_power_spectrum(epochs[0], channel=0)
+        if fig_psd:
+            st.plotly_chart(fig_psd, use_container_width=True)
 
 
 # ==================== PAGE: COMPARISON ====================
@@ -584,69 +676,123 @@ def show_demo_page():
 def show_comparison_page():
     st.markdown('<div class="sub-header">Model Performance Comparison</div>', unsafe_allow_html=True)
     
-    # Check if comparison results exist
-    results_file = "assets/model_comparison_detailed.csv"
+    # Try multiple possible locations
+    possible_paths = [
+        "assets/model_comparison_detailed.csv",
+        "model_comparison_detailed.csv",
+        "results/model_comparison_detailed.csv"
+    ]
     
-    if os.path.exists(results_file):
-        df = pd.read_csv(results_file)
-        
-        st.markdown("### 📊 Performance Metrics")
-        st.dataframe(df, use_container_width=True)
-        
-        # Bar chart comparison
-        fig = go.Figure()
-        
-        metrics = ['Accuracy', 'Precision', 'Recall', 'F1-Score']
-        colors = ['#3498db', '#2ecc71', '#f39c12', '#e74c3c']
-        
-        for metric, color in zip(metrics, colors):
-            if metric in df.columns:
-                fig.add_trace(go.Bar(
-                    name=metric,
-                    x=df['Model'],
-                    y=df[metric].astype(float),
-                    marker_color=color,
-                    text=[f'{v:.3f}' for v in df[metric].astype(float)],
-                    textposition='outside'
-                ))
-        
-        fig.update_layout(
-            title="Model Performance Comparison",
-            xaxis_title="Model",
-            yaxis_title="Score",
-            yaxis_range=[0, 1.1],
-            barmode='group',
-            height=500,
-            template='plotly_white'
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Best model
-        if 'F1-Score' in df.columns:
-            best_idx = df['F1-Score'].astype(float).idxmax()
-            best_model = df.loc[best_idx, 'Model']
-            best_f1 = df.loc[best_idx, 'F1-Score']
+    results_file = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            results_file = path
+            break
+    
+    if results_file and os.path.exists(results_file):
+        try:
+            df = pd.read_csv(results_file)
             
-            st.success(f"🏆 **Best Model:** {best_model} (F1-Score: {best_f1})")
+            st.markdown("### 📊 Performance Metrics")
+            st.dataframe(df.style.highlight_max(axis=0, subset=['Accuracy', 'Precision', 'Recall', 'F1-Score']), 
+                        use_container_width=True)
+            
+            # Visualization
+            create_comparison_chart(df)
+            
+            # Best model
+            if 'F1-Score' in df.columns:
+                best_idx = pd.to_numeric(df['F1-Score'], errors='coerce').idxmax()
+                best_model = df.loc[best_idx, 'Model']
+                best_f1 = df.loc[best_idx, 'F1-Score']
+                st.success(f"🏆 **Best Model:** {best_model} (F1-Score: {best_f1})")
+            
+            # Confusion matrices
+            show_confusion_matrices()
         
-        # Show confusion matrices if available
-        st.markdown("### 🔢 Confusion Matrices")
-        cm_image = "assets/confusion_matrices.png"
-        if os.path.exists(cm_image):
-            st.image(cm_image, caption="Confusion Matrices for All Models", use_container_width=True)
-        else:
-            st.info("Confusion matrix image not available")
-    
+        except Exception as e:
+            st.error(f"Error loading comparison data: {e}")
     else:
-        st.warning("⚠️ Model comparison results not found!")
-        st.info(f"Expected file: `{results_file}`")
-        st.markdown("""
-        **To generate comparison results:**
-        1. Run Tahap 4 (Evaluation) in Colab
-        2. Download `model_comparison_detailed.csv` from results
-        3. Place in `assets/` folder
-        """)
+        show_comparison_placeholder()
+
+
+def create_comparison_chart(df):
+    """Create comparison bar chart"""
+    metrics = ['Accuracy', 'Precision', 'Recall', 'F1-Score']
+    colors = ['#3498db', '#2ecc71', '#f39c12', '#e74c3c']
+    
+    fig = go.Figure()
+    
+    for metric, color in zip(metrics, colors):
+        if metric in df.columns:
+            values = pd.to_numeric(df[metric], errors='coerce')
+            fig.add_trace(go.Bar(
+                name=metric,
+                x=df['Model'],
+                y=values,
+                marker_color=color,
+                text=[f'{v:.3f}' for v in values],
+                textposition='outside'
+            ))
+    
+    fig.update_layout(
+        title="Model Performance Comparison",
+        xaxis_title="Model",
+        yaxis_title="Score",
+        yaxis_range=[0, 1.1],
+        barmode='group',
+        height=500,
+        template='plotly_white'
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def show_confusion_matrices():
+    """Show confusion matrix images"""
+    st.markdown("### 🔢 Confusion Matrices")
+    
+    cm_paths = [
+        "assets/confusion_matrices.png",
+        "confusion_matrices.png",
+        "results/confusion_matrices.png"
+    ]
+    
+    cm_image = None
+    for path in cm_paths:
+        if os.path.exists(path):
+            cm_image = path
+            break
+    
+    if cm_image:
+        st.image(cm_image, caption="Confusion Matrices", use_column_width=True)
+    else:
+        st.info("📊 Confusion matrix visualization not available")
+
+
+def show_comparison_placeholder():
+    """Show placeholder when no comparison data"""
+    st.warning("⚠️ Model comparison data not found!")
+    
+    st.info("""
+    **Untuk generate comparison results:**
+    
+    1. Train semua model (CNN1D, LSTM, CNN-LSTM, EEGNet)
+    2. Jalankan evaluation script
+    3. Download `model_comparison_detailed.csv`
+    4. Upload ke folder `assets/` atau root directory
+    """)
+    
+    # Show example structure
+    st.markdown("### 📋 Expected Data Format")
+    example_df = pd.DataFrame({
+        'Model': ['CNN1D', 'LSTM', 'CNN-LSTM', 'EEGNet'],
+        'Accuracy': [0.85, 0.88, 0.90, 0.92],
+        'Precision': [0.84, 0.87, 0.89, 0.91],
+        'Recall': [0.86, 0.89, 0.91, 0.93],
+        'F1-Score': [0.85, 0.88, 0.90, 0.92]
+    })
+    st.dataframe(example_df, use_container_width=True)
 
 
 # ==================== PAGE: ABOUT ====================
@@ -654,75 +800,24 @@ def show_comparison_page():
 def show_about_page():
     st.markdown('<div class="sub-header">About This Project</div>', unsafe_allow_html=True)
     
+    tab1, tab2, tab3 = st.tabs(["📖 Overview", "🔬 Methodology", "👥 Team"])
+    
+    with tab1:
+        show_overview_tab()
+    
+    with tab2:
+        show_methodology_tab()
+    
+    with tab3:
+        show_team_tab()
+
+
+def show_overview_tab():
     st.markdown("""
-    ### 📖 Project Information
+    ### 📋 Project Information
     
     **Title:** Deep Learning for EEG Signal Classification
     
-    **Objective:** Develop and compare multiple deep learning architectures for 
-    classifying EEG signals into training and online categories.
-    
-    ### 🎯 Methodology
-    
-    #### 1. Preprocessing Pipeline
-    - **Bandpass Filter:** 0.5-45 Hz to remove DC drift and high-frequency noise
-    - **Notch Filter:** 50 Hz to remove powerline interference
-    - **Epoching:** Segment continuous signal into 4-second epochs
-    - **Baseline Correction:** Remove DC offset from each epoch
-    - **Z-score Normalization:** Standardize amplitude across channels
-    
-    #### 2. Model Architectures
-    
-    **CNN1D (Convolutional Neural Network 1D)**
-    - Extracts local temporal features from EEG signals
-    - 3 convolutional blocks with increasing filters (64→128→256)
-    - Global average pooling for feature aggregation
-    
-    **LSTM (Long Short-Term Memory)**
-    - Captures long-term temporal dependencies
-    - Bidirectional architecture for forward and backward context
-    - 2 LSTM layers (128 and 64 units)
-    
-    **CNN-LSTM Hybrid**
-    - Combines spatial feature extraction (CNN) with temporal modeling (LSTM)
-    - CNN layers reduce dimensionality
-    - LSTM layers process temporal sequence
-    
-    **EEGNet**
-    - State-of-the-art architecture designed specifically for EEG
-    - Depthwise separable convolutions for efficiency
-    - Spatial and temporal convolutions
-    
-    #### 3. Training Configuration
-    - **Loss Function:** Sparse Categorical Crossentropy
-    - **Optimizer:** Adam (lr=0.001)
-    - **Batch Size:** 32
-    - **Early Stopping:** Patience 15 epochs
-    - **Learning Rate Reduction:** Factor 0.5, patience 5 epochs
-    
-    ### 📊 Evaluation Metrics
-    - **Accuracy:** Overall classification accuracy
-    - **Precision:** Positive predictive value
-    - **Recall:** Sensitivity (True Positive Rate)
-    - **F1-Score:** Harmonic mean of precision and recall
-    - **Confusion Matrix:** Detailed classification breakdown
-    
-    ### 🔬 Dataset
-    - **Subjects:** 25 participants
-    - **Sampling Rate:** 200 Hz
-    - **Classes:** 2 (Training, Online)
-    - **Data Split:** 70% train, 15% validation, 15% test
-    
-    ### 👥 Team
-    - **Developer:** Reghina(29), Nabila(71), Tabina(76)
-    - **Institution:** Program Studi Teknik Informatika, Universitas Padjadjaran.
-    - **Course:** Machine Learning
-    - **Year:** 2025
-    
-    """)
-
-
-# ==================== RUN APP ====================
-
-if __name__ == "__main__":
-    main()
+    **Objective:** Mengembangkan dan membandingkan berbagai arsitektur deep learning 
+    untuk klasifikasi sinyal EEG ke dalam kategori training dan online.
+                """)
