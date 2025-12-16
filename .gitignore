@@ -1,0 +1,36 @@
+# Create .gitignore
+cat > .gitignore << 'EOF'
+# Environment
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Models (if too large, use Git LFS)
+# models/*.h5
+
+# Data
+*.csv
+!data/sample_eeg.csv
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+EOF
